@@ -38,31 +38,43 @@ def determine_batch_size():
     batch_size = available_memory // (1024 * 1024 * 10)  # ~10 MB per 1024x1024 image
     return max(1, min(64, batch_size))
 
-def caption_image(image_path, prompt="<DETAILED_CAPTION>"):
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    torch_dtype = torch.float16
+def caption_image(image_path, model, processor, device="cuda:0", prompt="<DETAILED_CAPTION>"):
+    """
+    Generate a caption for a given image with optimized speed.
 
-    model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-large", torch_dtype=torch_dtype, trust_remote_code=True).to(device)
-    processor = AutoProcessor.from_pretrained("microsoft/Florence-2-large", trust_remote_code=True)
+    Args:
+        image_path (str): Path to the image.
+        model: Pre-loaded model instance.
+        processor: Pre-loaded processor instance.
+        device (str): Device to use ("cuda:0" or "cpu").
+        prompt (str): Prompt to guide the caption generation.
 
+    Returns:
+        str: Generated caption.
+    """
+    # Lade und konvertiere das Bild
     image = Image.open(image_path).convert('RGB')
     image_size = image.size
 
+    # Verarbeitung der Eingaben
     inputs = processor(text=prompt, images=image, return_tensors="pt")
     inputs = {
-        "input_ids": inputs["input_ids"].to(device).long(),
-        "pixel_values": inputs["pixel_values"].to(device, dtype=torch_dtype)
+        "input_ids": inputs["input_ids"].to(device),
+        "pixel_values": inputs["pixel_values"].to(device, dtype=torch.float16)
     }
 
-    with autocast():
+    # Generiere die Caption
+    with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
         generated_ids = model.generate(
             input_ids=inputs["input_ids"],
             pixel_values=inputs["pixel_values"],
-            max_new_tokens=1000,
-            num_beams=3,
-            do_sample=False
+            max_new_tokens=256,  # Begrenzte Token-Länge für schnellere Generierung
+            num_beams=1,         # Einfachere Hypothese für Geschwindigkeit
+            do_sample=True       # Sampling anstelle deterministischer Suche
         )
-    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+
+    # Post-Processing der Caption
     caption_dict = processor.post_process_generation(generated_text, task=prompt, image_size=image_size)
 
     if isinstance(caption_dict, dict) and prompt in caption_dict:
