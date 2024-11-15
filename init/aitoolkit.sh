@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+TRAIN_URL="https://raw.githubusercontent.com/webdebug/flux-train/main/train.py"
+INFERENCE_URL="https://raw.githubusercontent.com/webdebug/flux-train/main/inference.py"
+WORKSPACE="/workspace/ai-toolkit"
+
 # Check if zip and unzip are installed, if not install them
 if ! command -v zip &> /dev/null || ! command -v unzip &> /dev/null; then
     apt update
@@ -67,11 +71,16 @@ else
 fi
 
 # Download run.py if it doesn't exist
-if [ ! -f "/workspace/ai-toolkit/train.py" ]; then
-    curl -o /workspace/ai-toolkit/train.py https://geocine.github.io/flux/train.py
-    echo "Downloaded train.py"
+if [ ! -f "$WORKSPACE/train.py" ]; then
+    echo "Lade train.py herunter..."
+    curl -o "$WORKSPACE/train.py" -s "$TRAIN_URL"
+    if [ $? -ne 0 ]; then
+        echo "Fehler beim Herunterladen von train.py."
+        exit 1
+    fi
+    echo "train.py heruntergeladen und gespeichert unter $WORKSPACE/train.py."
 else
-    echo "train.py already exists, skipping download..."
+    echo "train.py existiert bereits, überspringe Download..."
 fi
 
 # Create run.sh file if it doesn't exist
@@ -90,11 +99,16 @@ else
 fi
 
 # Download inference.py if it doesn't exist
-if [ ! -f "/workspace/ai-toolkit/inference.py" ]; then
-    curl -o /workspace/ai-toolkit/inference.py https://geocine.github.io/flux/inference.py
-    echo "Downloaded inference.py"
+if [ ! -f "$WORKSPACE/inference.py" ]; then
+    echo "Lade inference.py herunter..."
+    curl -o "$WORKSPACE/inference.py" -s "$INFERENCE_URL"
+    if [ $? -ne 0 ]; then
+        echo "Fehler beim Herunterladen von inference.py."
+        exit 1
+    fi
+    echo "inference.py heruntergeladen und gespeichert unter $WORKSPACE/inference.py."
 else
-    echo "inference.py already exists, skipping download..."
+    echo "inference.py existiert bereits, überspringe Download..."
 fi
 
 # Create gen.sh file if it doesn't exist
