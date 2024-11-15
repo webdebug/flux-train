@@ -6,7 +6,7 @@ TRAINER="aitoolkit"
 # Check if any arguments are passed
 if [ $# -eq 0 ]; then
     # No arguments, use default behavior
-    INIT_URL="https://geocine.github.io/flux/init/${TRAINER}.sh"
+    INIT_URL="https://raw.githubusercontent.com/webdebug/flux-train/main/init/${TRAINER}.sh"
     curl -s "$INIT_URL" | sh
 else
     # Arguments passed, use bash for more advanced parsing
@@ -38,8 +38,8 @@ if [[ ! " ${valid_trainers[@]} " =~ " ${TRAINER} " ]]; then
     exit 1
 fi
 
-# URL for the specific trainer's init script
-INIT_URL="https://geocine.github.io/flux/init/${TRAINER}.sh"
+# URL for the specific trainer's init script from GitHub
+INIT_URL="https://raw.githubusercontent.com/webdebug/flux-train/main/init/${TRAINER}.sh"
 
 # Download and execute the specific init script
 curl -s "$INIT_URL" | sh
