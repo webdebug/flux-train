@@ -38,6 +38,16 @@ def determine_batch_size():
     batch_size = available_memory // (1024 * 1024 * 10)  # ~10 MB per 1024x1024 image
     return max(1, min(64, batch_size))
 
+# Initialisierung
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+model = AutoModelForCausalLM.from_pretrained(
+    "microsoft/Florence-2-large",
+    torch_dtype=torch.float16,
+    trust_remote_code=True
+).to(device)
+
+processor = AutoProcessor.from_pretrained("microsoft/Florence-2-large", trust_remote_code=True)
+
 def caption_image(image_path, model, processor, device="cuda:0", prompt="<DETAILED_CAPTION>"):
     """
     Generate a caption for a given image with optimized speed.
