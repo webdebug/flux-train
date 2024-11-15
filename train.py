@@ -74,7 +74,7 @@ def caption_image(image_path, model, processor, device="cuda:0", prompt="<DETAIL
     }
 
     # Generiere die Caption
-    with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
+    with torch.amp.autocast("cuda"):  # Korrekte Nutzung der neuen API
         generated_ids = model.generate(
             input_ids=inputs["input_ids"],
             pixel_values=inputs["pixel_values"],
@@ -114,7 +114,7 @@ def process_images(input_folder):
             if os.path.exists(caption_path):
                 logging.info(f"Caption already exists for {filename}, skipping...")
                 continue
-                
+
             # Öffne das Bild und wende Augmentierungen an
             image = Image.open(image_path).convert('RGB')
             image = augmentations(image)
@@ -123,7 +123,6 @@ def process_images(input_folder):
             caption = caption_image(image_path, model, processor, device=device)
 
             # Entferne irrelevante Teile der Caption
-            caption = caption_image(image_path)
             caption = caption.replace("of the image", "")
 
             if caption:
