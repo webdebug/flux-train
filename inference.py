@@ -35,7 +35,7 @@ elif os.path.islink(lora_dir):
     print(f"{lora_dir} is a symlink, skipping creation.")
 
 # Load the base FLUX model
-model_id = "black-forest-labs/FLUX.1-dev"
+model_id = "multimodalart/FLUX.1-dev2pro-full"
 pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
 pipe = pipe.to("cuda")
 
