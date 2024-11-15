@@ -1,136 +1,120 @@
 import os
 import sys
+import concurrent.futures
 import argparse
 import logging
 import torch
+import oyaml as yaml
 from collections import OrderedDict
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForCausalLM
-from torch.utils.data import DataLoader
-from torchvision import transforms
-from torch.cuda.amp import autocast, GradScaler
-import oyaml as yaml
 from toolkit.job import run_job
+from transformers import AutoProcessor, AutoModelForCausalLM
 from typing import Union
-
-# Token setup
-if "HF_TOKEN" not in os.environ or not os.environ["HF_TOKEN"]:
-    if not os.path.isfile("token"):
-        with open("token", "w") as token_file:
-            pass
-        print("Token file created. Please add your Hugging Face token to the 'token' file and run the script again.")
-        sys.exit(1)
-    elif os.path.getsize("token") == 0:
-        print("Token file is empty. Please add your Hugging Face token to the 'token' file and run the script again.")
-        sys.exit(1)
-    with open("token", "r") as token_file:
-        os.environ["HF_TOKEN"] = token_file.read().strip()
-else:
-    print("Using HF_TOKEN from environment variable.")
+from unittest.mock import patch
+from transformers.dynamic_module_utils import get_imports
 
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"  # Avoid fragmentation issues
+
+# Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def determine_batch_size():
-    total_memory = torch.cuda.get_device_properties(0).total_memory
-    reserved_memory = 8 * 1024**3  # 8 GB reserved
-    available_memory = total_memory - reserved_memory
-    batch_size = available_memory // (1024 * 1024 * 10)  # ~10 MB per 1024x1024 image
-    return max(1, min(64, batch_size))
+# Workaround for unnecessary flash_attn requirement
+def fixed_get_imports(filename: Union[str, os.PathLike]) -> list[str]:
+    if not str(filename).endswith("modeling_florence2.py"):
+        return get_imports(filename)
+    imports = get_imports(filename)
+    if "flash_attn" in imports:
+        imports.remove("flash_attn")
+    return imports
 
-# Initialisierung
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-model = AutoModelForCausalLM.from_pretrained(
-    "microsoft/Florence-2-large",
-    torch_dtype=torch.float16,
-    trust_remote_code=True
-).to(device)
+# Load the model and processor once, so they don't need to be reloaded for every image
+with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    torch_dtype = torch.float16  # Use FP16 for better performance on H100
+    model = AutoModelForCausalLM.from_pretrained("microsoft/Florence-2-large", torch_dtype=torch_dtype, trust_remote_code=True).to(device)
+    processor = AutoProcessor.from_pretrained("microsoft/Florence-2-large", trust_remote_code=True)
 
-processor = AutoProcessor.from_pretrained("microsoft/Florence-2-large", trust_remote_code=True)
+def caption_images_batch(image_paths, prompt="<DETAILED_CAPTION>"):
+    logging.info(f"Captioning batch of {len(image_paths)} images")
 
-def caption_image(image_path, model, processor, device="cuda:0", prompt="<DETAILED_CAPTION>"):
-    """
-    Generate a caption for a given image with optimized speed.
+    # Open and process all images
+    images = [Image.open(image_path).convert('RGB') for image_path in image_paths]
 
-    Args:
-        image_path (str): Path to the image.
-        model: Pre-loaded model instance.
-        processor: Pre-loaded processor instance.
-        device (str): Device to use ("cuda:0" or "cpu").
-        prompt (str): Prompt to guide the caption generation.
+    try:
+        inputs = processor(text=[prompt] * len(images), images=images, return_tensors="pt")
+    except ValueError as e:
+        logging.error(f"Error processing batch of images: {str(e)}")
+        return [None] * len(image_paths)
 
-    Returns:
-        str: Generated caption.
-    """
-    # Lade und konvertiere das Bild
-    image = Image.open(image_path).convert('RGB')
-    image_size = image.size
-
-    # Verarbeitung der Eingaben
-    inputs = processor(text=prompt, images=image, return_tensors="pt")
+    # Convert inputs to the correct dtype and device
     inputs = {
-        "input_ids": inputs["input_ids"].to(device),
-        "pixel_values": inputs["pixel_values"].to(device, dtype=torch.float16)
+        "input_ids": inputs["input_ids"].to(device).long(),
+        "pixel_values": inputs["pixel_values"].to(device, dtype=torch_dtype)
     }
 
-    # Generiere die Caption
-    with torch.amp.autocast("cuda"):  # Korrekte Nutzung der neuen API
+    # Generate captions in batch
+    try:
         generated_ids = model.generate(
             input_ids=inputs["input_ids"],
             pixel_values=inputs["pixel_values"],
-            max_new_tokens=256,  # Begrenzte Token-Länge für schnellere Generierung
-            num_beams=1,         # Einfachere Hypothese für Geschwindigkeit
-            do_sample=True       # Sampling anstelle deterministischer Suche
+            max_new_tokens=500,  # Reduced max tokens for faster generation
+            num_beams=1,  # Reduced beam search to speed up generation
+            do_sample=False
         )
-    generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    except RuntimeError as e:
+        if "CUDA out of memory" in str(e):
+            logging.error(f"CUDA out of memory during batch processing. Consider reducing batch size or using gradient checkpointing.")
+            return [None] * len(image_paths)
+        else:
+            raise e
 
-    # Post-Processing der Caption
-    caption_dict = processor.post_process_generation(generated_text, task=prompt, image_size=image_size)
+    generated_texts = processor.batch_decode(generated_ids, skip_special_tokens=False)
 
-    if isinstance(caption_dict, dict) and prompt in caption_dict:
-        caption = caption_dict[prompt]
-        if isinstance(caption, list):
-            caption = ' '.join(caption)
-    else:
-        caption = str(caption_dict)
+    captions = []
+    for i, generated_text in enumerate(generated_texts):
+        caption_dict = processor.post_process_generation(generated_text, task=prompt, image_size=images[i].size)
+        if isinstance(caption_dict, dict) and prompt in caption_dict:
+            caption = caption_dict[prompt]
+            if isinstance(caption, list):
+                caption = ' '.join(caption)
+        else:
+            caption = str(caption_dict)
+        captions.append(caption)
 
-    return caption
+    return captions
 
-def process_images(input_folder):
-    augmentations = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-        transforms.RandomResizedCrop(size=(1024, 1024), scale=(0.8, 1.0))
-    ])
+def process_images_parallel(input_folder, batch_size=4):  # Reduced batch size to avoid CUDA out of memory
+    image_files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))]
+    
+    # Process images in parallel batches
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:  # Adjust max_workers based on system resources
+        futures = []
+        for i in range(0, len(image_files), batch_size):
+            batch_files = image_files[i:i + batch_size]
+            batch_paths = [os.path.join(input_folder, f) for f in batch_files]
+            futures.append(executor.submit(caption_images_batch_and_save, batch_paths))
+        
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:
+                logging.error(f"Error processing batch: {exc}")
 
-    for filename in os.listdir(input_folder):
-        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
-            image_path = os.path.join(input_folder, filename)
-            caption_filename = f"{os.path.splitext(filename)[0]}.txt"
-            caption_path = os.path.join(input_folder, caption_filename)
-
-            # Überspringe, wenn die Caption bereits existiert
-            if os.path.exists(caption_path):
-                logging.info(f"Caption already exists for {filename}, skipping...")
-                continue
-
-            # Öffne das Bild und wende Augmentierungen an
-            image = Image.open(image_path).convert('RGB')
-            image = augmentations(image)
-
-            # Rufe caption_image mit den erforderlichen Argumenten auf
-            caption = caption_image(image_path, model, processor, device=device)
-
-            # Entferne irrelevante Teile der Caption
+def caption_images_batch_and_save(image_paths):
+    captions = caption_images_batch(image_paths)
+    for image_path, caption in zip(image_paths, captions):
+        if caption:
+            caption_filename = f"{os.path.splitext(os.path.basename(image_path))[0]}.txt"
+            caption_path = os.path.join(os.path.dirname(image_path), caption_filename)
+            if caption.startswith("The image shows a"):
+                caption = "A" + caption[17:]
             caption = caption.replace("of the image", "")
-
-            if caption:
-                with open(caption_path, "w", encoding='utf-8') as caption_file:
-                    caption_file.write(caption)
-                logging.info(f"Caption saved for {filename}")
-            else:
-                logging.error(f"Failed to get caption for {filename}")
+            with open(caption_path, "w", encoding='utf-8') as caption_file:
+                caption_file.write(caption)
+            logging.info(f"Caption saved for {os.path.basename(image_path)}")
+        else:
+            logging.error(f"Failed to get caption for {os.path.basename(image_path)}")
 
 def count_images(folder):
     return len([f for f in os.listdir(folder) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))])
@@ -145,16 +129,22 @@ def main():
     parser.add_argument("model_name", nargs='?', default="lora", help="Name of the model (default: lora)")
     args = parser.parse_args()
 
+    # Static paths
     config_file = '/workspace/config.yaml'
+
+    # Load config
     if not os.path.exists(config_file):
         print(f"Error: Config file '{config_file}' not found.")
+        print("Please create a 'config.yaml' file in the /workspace directory.")
         sys.exit(1)
 
     config = load_config(config_file)
 
-    input_folder = config.get('data_folder', '/workspace/data')
+    # Get input folder from config, with alias support
+    input_folder = config.get('data_folder', config.get('input_folder', '/workspace/data'))
     output_folder = '/workspace/output'
 
+    # Check if input folder exists and contains images
     if not os.path.exists(input_folder):
         print(f"Error: Input folder '{input_folder}' does not exist.")
         sys.exit(1)
@@ -162,20 +152,27 @@ def main():
     num_images = count_images(input_folder)
     if num_images == 0:
         print(f"Error: No images found in the input folder '{input_folder}'.")
+        print("Please add some images (PNG, JPG, JPEG, or GIF) to the input folder and try again.")
         sys.exit(1)
 
+    # Get trigger from config if not provided as argument
     trigger = args.trigger or config.get('trigger')
+
+    # Get prompts from config
     prompts = config.get('prompts', [])
     if not prompts:
         print("Error: No prompts found in the config file.")
+        print("Please add prompts to the 'config.yaml' file.")
         sys.exit(1)
 
-    process_images(input_folder)
+    # Process images in parallel
+    process_images_parallel(input_folder)
     logging.info("Pre-process completed")
 
+    # Calculate steps (use config value if present, otherwise default)
     steps = config.get('steps', num_images * 100)
-    batch_size = determine_batch_size()
 
+    # Prepare job configuration
     job_to_run = OrderedDict([
         ('job', 'extension'),
         ('config', OrderedDict([
@@ -208,14 +205,14 @@ def main():
                         ])
                     ]),
                     ('train', OrderedDict([
-                        ('batch_size', batch_size),
+                        ('batch_size', 16),
                         ('steps', steps),
                         ('gradient_accumulation_steps', 4),
                         ('train_unet', True),
                         ('train_text_encoder', False),
                         ('gradient_checkpointing', True),
                         ('optimizer', 'adamw8bit'),
-                        ('lr', config.get('lr', 4e-4)),
+                        ('lr', config.get('lr', 5e-4)),
                         ('lr_scheduler', 'cosine'),
                         ('lr_scheduler_params', OrderedDict([
                             ('T_max', steps),
@@ -228,7 +225,7 @@ def main():
                         ('dtype', 'bf16')
                     ])),
                     ('model', OrderedDict([
-                        ('name_or_path', config.get('base_model', 'black-forest-labs/FLUX.1-dev')),
+                        ('name_or_path', config.get('base_model', config.get('name_or_path', 'multimodalart/FLUX.1-dev2pro-full'))),
                         ('is_flux', True),
                         ('quantize', True)
                     ])),
@@ -253,6 +250,7 @@ def main():
         ]))
     ])
 
+    # Run the job
     run_job(job_to_run)
 
 if __name__ == "__main__":
