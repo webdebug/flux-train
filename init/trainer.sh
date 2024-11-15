@@ -49,8 +49,8 @@ download_if_not_exists() {
     fi
 }
 
-download_if_not_exists "black-forest-labs/FLUX.1-dev" "flux1-dev.safetensors"
-download_if_not_exists "black-forest-labs/FLUX.1-dev" "ae.safetensors"
+download_if_not_exists "multimodalart/FLUX.1-dev2pro-full" "flux1-dev.safetensors"
+download_if_not_exists "multimodalart/FLUX.1-dev2pro-full" "ae.safetensors"
 download_if_not_exists "comfyanonymous/flux_text_encoders" "clip_l.safetensors"
 download_if_not_exists "comfyanonymous/flux_text_encoders" "t5xxl_fp16.safetensors"
 
