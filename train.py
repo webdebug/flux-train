@@ -110,13 +110,19 @@ def process_images(input_folder):
             caption_filename = f"{os.path.splitext(filename)[0]}.txt"
             caption_path = os.path.join(input_folder, caption_filename)
 
+            # Überspringe, wenn die Caption bereits existiert
             if os.path.exists(caption_path):
                 logging.info(f"Caption already exists for {filename}, skipping...")
                 continue
-
+                
+            # Öffne das Bild und wende Augmentierungen an
             image = Image.open(image_path).convert('RGB')
             image = augmentations(image)
 
+            # Rufe caption_image mit den erforderlichen Argumenten auf
+            caption = caption_image(image_path, model, processor, device=device)
+
+            # Entferne irrelevante Teile der Caption
             caption = caption_image(image_path)
             caption = caption.replace("of the image", "")
 
